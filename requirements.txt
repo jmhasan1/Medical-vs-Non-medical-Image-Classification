@@ -4,7 +4,7 @@ requests        # HTTP requests to download web pages and images
 beautifulsoup4  # Parse HTML from URLs
 Pillow          # Basic image file handling (convert, verify)
 tqdm            # Progress bar
-
+imagehash
 
 # torch>=1.13.0
 # torchvision

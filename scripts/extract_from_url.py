@@ -5,12 +5,16 @@ from bs4 import BeautifulSoup
 from tqdm import tqdm
 from PIL import Image
 import io
+from urllib.parse import urljoin
 
-def extract_images_from_url(url, out_dir):
+def extract_images_from_url(url, out_dir, min_size=200, allowed_ext=("jpg", "jpeg", "png")):
     """
-    Downloads and saves images from a webpage.
+    Downloads and saves images from a webpage, with filters for size and extension.
+    
     :param url: Webpage URL
     :param out_dir: Directory to save extracted images
+    :param min_size: Minimum width/height for image
+    :param allowed_ext: Tuple of allowed file extensions
     :return: Number of images downloaded
     """
     try:
@@ -41,17 +45,22 @@ def extract_images_from_url(url, out_dir):
             if img_url.startswith("//"):
                 img_url = "https:" + img_url
             elif img_url.startswith("/"):
-                from urllib.parse import urljoin
                 img_url = urljoin(url, img_url)
+
+            # Filter by extension
+            ext = img_url.split(".")[-1].lower().split("?")[0]
+            if ext not in allowed_ext:
+                continue
 
             try:
                 img_data = requests.get(img_url, timeout=10).content
                 im = Image.open(io.BytesIO(img_data))
 
-                # Determine file extension
-                ext = im.format.lower() if im.format else "jpg"
-                out_path = out_dir / f"{Path(url).stem}_img{idx+1}.{ext}"
+                # Skip small images
+                if im.width < min_size or im.height < min_size:
+                    continue
 
+                out_path = out_dir / f"{Path(url).stem}_img{idx+1}.{ext}"
                 im.save(out_path)
                 img_count += 1
             except Exception as e:
