@@ -1,0 +1,22 @@
+
+PyMuPDF         # `fitz` – extract images from PDF
+requests        # HTTP requests to download web pages and images
+beautifulsoup4  # Parse HTML from URLs
+Pillow          # Basic image file handling (convert, verify)
+tqdm            # Progress bar
+
+
+# torch>=1.13.0
+# torchvision
+# numpy
+# Pillow
+# tqdm
+# scikit-learn
+# scikit-image
+# opencv-python
+# pymupdf
+# beautifulsoup4
+# requests
+# git+https://github.com/mlfoundations/open_clip.git@main
+# # Optional (if you prefer original CLIP)
+# # git+https://github.com/openai/CLIP.git
