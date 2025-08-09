@@ -11,6 +11,7 @@ numpy
 scikit-learn
 torch
 torchvision
+git+https://github.com/mlfoundations/open_clip.git@main
 
 # torch>=1.13.0
 # torchvision
