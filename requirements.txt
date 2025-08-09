@@ -5,6 +5,12 @@ beautifulsoup4  # Parse HTML from URLs
 Pillow          # Basic image file handling (convert, verify)
 tqdm            # Progress bar
 imagehash
+matplotlib
+pandas
+numpy
+scikit-learn
+torch
+torchvision
 
 # torch>=1.13.0
 # torchvision

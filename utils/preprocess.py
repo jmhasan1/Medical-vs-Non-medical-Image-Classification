@@ -4,6 +4,24 @@ from PIL import Image
 import imagehash
 from tqdm import tqdm
 
+import torchvision.transforms as T
+
+def get_basic_transforms(img_size=224):
+    """
+    Deterministic preprocessing for feature extraction.
+    Resizes, converts to tensor, and normalizes to ImageNet stats.
+    Suitable for MobileNetV2 / CLIP embeddings.
+    """
+    return T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        ),
+    ])
+
+
 def preprocess_images(source_dirs, output_dir, image_size=(224, 224), min_size=200):
     """
     Cleans and preprocesses images from multiple source directories.
