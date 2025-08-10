@@ -4,7 +4,7 @@
 - Extract images from PDFs & web pages.
 - Two inference paths:
   - CLIP zero-shot (no training)
-  - Lightweight CNN (MobileNetV2) fine-tunable
+  - Lightweight CNN (MobileNetV2 for featre extraction) ad K-Means for clustering 
 
 ## Setup
 1. Create venv and install:
