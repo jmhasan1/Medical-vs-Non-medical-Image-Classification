@@ -8,6 +8,8 @@ import torchvision.models as models
 from sklearn.cluster import KMeans
 import numpy as np
 import shutil
+import joblib
+import os
 
 from utils.preprocess import get_basic_transforms
 
@@ -59,6 +61,11 @@ def cluster_images(data_dir, out_csv, n_clusters=2, img_size=224, output_folders
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     preds = kmeans.fit_predict(features)
 
+     # --- New code: Save the trained KMeans model ---
+    os.makedirs('models', exist_ok=True)  # Create models directory if it doesn't exist
+    joblib.dump(kmeans, 'models/kmeans_mobilenet.pkl')  # Save model as pickle file
+    print("Saved MobileNet KMeans model to models/kmeans_mobilenet.pkl")
+
     # Save predictions CSV
     df = pd.DataFrame({
         "image_path": [str(p) for p in valid_paths],
@@ -85,6 +92,8 @@ def cluster_images(data_dir, out_csv, n_clusters=2, img_size=224, output_folders
                     print(f"⚠️ Failed to copy {file_path}: {e}")
 
         print(f"📂 Cluster folders created in: {out_dir}")
+
+    
 
 
 if __name__ == "__main__":

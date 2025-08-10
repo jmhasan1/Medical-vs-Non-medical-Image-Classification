@@ -1,359 +1,199 @@
-# app.py
-"""
-Gradio app for Medical vs Non-Medical Image Classification
-- Supports: Upload PDF, enter a webpage URL, or upload images
-- Uses: open_clip (zero-shot) + optional MobileNetV2 fine-tuned CNN (best_model.pth)
-- Designed for Hugging Face Spaces (Gradio). Keep models small for resource limits.
-"""
-
-import os
-import io
-import time
-import tempfile
-import traceback
-from pathlib import Path
-from typing import List, Tuple
-import pandas as pd
-from PIL import Image
-import requests
-from bs4 import BeautifulSoup
-
-import gradio as gr
-
-# open_clip (installed via requirements)
+import streamlit as st
 import torch
-try:
-    import open_clip
-except Exception as e:
-    open_clip = None
-    print("open_clip not available:", e)
-
-# torchvision for optional CNN
-import torchvision.transforms as T
+from PIL import Image
+import joblib
+import clip
 import torchvision.models as models
+import numpy as np
+import time
+import sys
+from pathlib import Path
 
-# PyMuPDF for PDF extraction
-try:
-    import fitz
-except Exception:
-    fitz = None
+# Add the project root to the path
+sys.path.append(str(Path(__file__).resolve().parent))
 
-# -------------------------
-# Configuration / Constants
-# -------------------------
-TEXT_LABELS = ["medical", "non-medical"]
-CLIP_MODEL_NAME = "ViT-B-32"   # relatively small/fast
-CLIP_PRETRAINED = "openai"
-CNN_WEIGHTS = "best_model.pth"  # optional: place in repo root to enable CNN inference
-IMG_SIZE = 224                 # CLIP preprocess will handle cropping; CNN uses resize
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+from utils.preprocess import get_basic_transforms
 
-# -------------------------
-# Utility: Image Extraction
-# -------------------------
-def extract_images_from_pdf_bytes(pdf_bytes: bytes, out_dir: str, max_images: int = 200) -> List[str]:
-    """
-    Extract images from a PDF provided as bytes using PyMuPDF (fitz).
-    Returns list of saved image paths.
-    """
-    if fitz is None:
-        raise RuntimeError("PyMuPDF (fitz) is required for PDF extraction. Install pymupdf.")
-    saved = []
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    for i in range(len(doc)):
-        page = doc[i]
-        imglist = page.get_images(full=True)
-        for img_index, img in enumerate(imglist):
-            if len(saved) >= max_images:
-                break
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            ext = base_image["ext"]
-            out_path = Path(out_dir) / f"page{i+1}_img{img_index+1}.{ext}"
-            with open(out_path, "wb") as f:
-                f.write(image_bytes)
-            saved.append(str(out_path))
-    return saved
 
-def extract_images_from_url(url: str, out_dir: str, max_images: int = 200) -> List[str]:
-    """
-    Download <img> sources from a web page.
-    """
-    saved = []
-    try:
-        r = requests.get(url, timeout=12)
-        r.raise_for_status()
-    except Exception as e:
-        print("failed fetching url:", e)
-        return saved
-    soup = BeautifulSoup(r.text, "html.parser")
-    imgs = soup.find_all("img")
-    for i, img in enumerate(imgs):
-        if len(saved) >= max_images:
-            break
-        src = img.get("src") or img.get("data-src") or img.get("data-lazy-src")
-        if not src:
-            continue
-        img_url = requests.compat.urljoin(url, src)
-        try:
-            res = requests.get(img_url, timeout=10)
-            if res.status_code == 200 and "image" in res.headers.get("Content-Type", ""):
-                ext = res.headers.get("Content-Type").split("/")[-1].split(";")[0]
-                fname = f"web_img_{i+1}.{ext}"
-                out_path = Path(out_dir) / fname
-                with open(out_path, "wb") as f:
-                    f.write(res.content)
-                saved.append(str(out_path))
-        except Exception as e:
-            # skip problematic images
-            continue
-    return saved
-
-def load_pil_image(path_or_bytes) -> Image.Image:
-    if isinstance(path_or_bytes, (bytes, bytearray)):
-        return Image.open(io.BytesIO(path_or_bytes)).convert("RGB")
-    else:
-        return Image.open(path_or_bytes).convert("RGB")
-
-# -------------------------
-# CLIP (open_clip) loading
-# -------------------------
-_clip_model = None
-_clip_preprocess = None
-
-def load_clip(model_name=CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED, device=DEVICE):
-    global _clip_model, _clip_preprocess
-    if _clip_model is not None and _clip_preprocess is not None:
-        return _clip_model, _clip_preprocess
-    if open_clip is None:
-        raise RuntimeError("open_clip not installed. Add git+https://github.com/mlfoundations/open_clip.git to requirements.")
-    model, _, preprocess = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-    model.to(device)
+@st.cache_resource(show_spinner=False)
+def load_mobilenet_model(device):
+    """Load MobileNetV2 model for feature extraction"""
+    model = models.mobilenet_v2(pretrained=True)
+    model.classifier = torch.nn.Identity()  # Remove classification layer
+    model = model.to(device)
     model.eval()
-    _clip_model = model
-    _clip_preprocess = preprocess
-    return _clip_model, _clip_preprocess
+    return model
 
-def clip_predict(image_pil: Image.Image, model, preprocess, device=DEVICE) -> Tuple[str, float]:
-    img_t = preprocess(image_pil).unsqueeze(0).to(device)
-    texts = TEXT_LABELS
-    text_tokens = open_clip.tokenize(texts).to(device)
+
+@st.cache_resource(show_spinner=False)
+def load_clip_model(device, model_name="ViT-B/32"):
+    """Load CLIP model"""
+    model, preprocess = clip.load(model_name, device=device)
+    return model, preprocess
+
+
+def extract_mobilenet_embedding(model, image, device, img_size=224):
+    """Extract embedding from image using MobileNet"""
+    transform = get_basic_transforms(img_size)
+    
     with torch.no_grad():
-        image_features = model.encode_image(img_t)
-        text_features = model.encode_text(text_tokens)
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        logits = 100.0 * image_features @ text_features.t()
-        probs = logits.softmax(dim=-1).cpu().numpy()[0]
-    # return best label and confidence
-    best_idx = int(probs.argmax())
-    return texts[best_idx], float(probs[best_idx])
+        tensor = transform(image).unsqueeze(0).to(device)
+        embedding = model(tensor).cpu().numpy().flatten()
+    
+    return embedding
 
-# -------------------------
-# Optional CNN (MobileNetV2)
-# -------------------------
-_cnn_model = None
-_cnn_transform = None
-def load_cnn(weights_path=CNN_WEIGHTS, device=DEVICE):
-    global _cnn_model, _cnn_transform
-    if _cnn_model is not None:
-        return _cnn_model, _cnn_transform
-    # Load MobileNetV2
-    model = models.mobilenet_v2(pretrained=False)
-    # replace classifier
-    num_ftrs = model.classifier[1].in_features
-    import torch.nn as nn
-    model.classifier[1] = nn.Linear(num_ftrs, len(TEXT_LABELS))
-    # load weights if present
-    if Path(weights_path).exists():
-        ckpt = torch.load(weights_path, map_location=device)
-        model.load_state_dict(ckpt)
-        print("Loaded CNN weights from", weights_path)
+
+def extract_clip_embedding(model, preprocess, image, device):
+    """Extract embedding from image using CLIP"""
+    with torch.no_grad():
+        image_tensor = preprocess(image).unsqueeze(0).to(device)
+        embedding = model.encode_image(image_tensor)
+        embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+        embedding = embedding.cpu().numpy().flatten()
+    
+    return embedding
+
+
+@st.cache_resource(show_spinner=False)
+def load_models(device):
+    """Load all models and kmeans clusterers"""
+    try:
+        # Load models
+        mobilenet_model = load_mobilenet_model(device)
+        clip_model, preprocess = load_clip_model(device)
+        
+        # Load KMeans models
+        kmeans_mobilenet = joblib.load('models/kmeans_mobilenet.pkl')
+        kmeans_clip = joblib.load('models/kmeans_clip.pkl')
+        
+        return mobilenet_model, clip_model, preprocess, kmeans_mobilenet, kmeans_clip
+    except FileNotFoundError as e:
+        st.error(f"Model file not found: {e}")
+        st.error("Please ensure you have run the clustering scripts first to generate the model files.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Error loading models: {e}")
+        st.stop()
+
+
+def map_cluster_to_label(cluster_id, model_type="mobilenet"):
+    """Map cluster IDs to human-readable labels"""
+    # This mapping might need to be adjusted based on your actual clustering results
+    # You may need to inspect your clustering results to determine the correct mapping
+    
+    if model_type == "mobilenet":
+        # Assuming cluster 0 is medical and cluster 1 is non-medical
+        # You might need to adjust this based on your actual results
+        mapping = {0: "medical", 1: "non-medical"}
+    else:  # CLIP
+        # CLIP clustering already has zero-shot labeling in the original script
+        # But we'll use a similar mapping for consistency
+        mapping = {0: "medical", 1: "non-medical"}
+    
+    return mapping.get(cluster_id, f"cluster_{cluster_id}")
+
+
+def ensemble_vote(pred1, pred2):
+    """Ensemble voting strategy"""
+    if pred1 == pred2:
+        return pred1
     else:
-        # if not present, indicate unavailability
-        print("CNN weights not found at", weights_path, "; CNN inference will be disabled.")
-        return None, None
-    model.to(device)
-    model.eval()
-    _cnn_model = model
-    # transform for CNN
-    _cnn_transform = T.Compose([
-        T.Resize((IMG_SIZE, IMG_SIZE)),
-        T.ToTensor(),
-        T.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
-    ])
-    return _cnn_model, _cnn_transform
+        # Tie breaker: prefer CLIP prediction (as it has zero-shot labeling)
+        return pred2
 
-def cnn_predict(image_pil: Image.Image, model, transform, device=DEVICE) -> Tuple[str, float]:
-    x = transform(image_pil).unsqueeze(0).to(device)
-    with torch.no_grad():
-        out = model(x)
-        probs = torch.softmax(out, dim=1).cpu().numpy()[0]
-    # index mapping: 0 -> non-medical, 1 -> medical (as per training script)
-    idx = int(probs.argmax())
-    label = TEXT_LABELS[idx] if idx < len(TEXT_LABELS) else "unknown"
-    return label, float(probs[idx])
 
-# -------------------------
-# Inference Pipeline
-# -------------------------
-def classify_images(image_paths: List[str], use_cnn: bool = True):
-    """
-    For each path, run CLIP and optionally CNN, return results list.
-    """
-    results = []
-    # ensure CLIP loaded
-    try:
-        clip_model, clip_pre = load_clip()
-    except Exception as e:
-        return {"error": f"Failed to load CLIP: {e}\n{traceback.format_exc()}"}
-    # load CNN if requested
-    cnn_model, cnn_transform = None, None
-    if use_cnn:
+def main():
+    st.title("🏥 Medical vs Non-medical Image Classification")
+    st.markdown("*Unsupervised clustering approach using MobileNet + CLIP ensemble*")
+    
+    # Check device
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    st.sidebar.info(f"Using device: **{device}**")
+    
+    # Load models
+    with st.spinner("Loading models..."):
         try:
-            cnn_model, cnn_transform = load_cnn()
-            if cnn_model is None:
-                use_cnn = False
+            mobilenet_model, clip_model, preprocess, kmeans_mobilenet, kmeans_clip = load_models(device)
+            st.sidebar.success("✅ Models loaded successfully!")
         except Exception as e:
-            print("Failed to load CNN:", e)
-            use_cnn = False
+            st.error(f"Failed to load models: {e}")
+            return
 
-    for p in image_paths:
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Upload an image", 
+        type=["jpg", "jpeg", "png", "bmp", "tiff"],
+        help="Upload a medical or non-medical image for classification"
+    )
+    
+    if uploaded_file is not None:
         try:
-            pil = load_pil_image(p)
+            # Load and display image
+            img = Image.open(uploaded_file).convert('RGB')
+            
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                st.image(img, caption="Uploaded Image", use_column_width=True)
+            
+            with col2:
+                st.subheader("Classification Results")
+                
+                with st.spinner("Running MobileNet classification..."):
+                    # MobileNet prediction
+                    start = time.perf_counter()
+                    emb_mn = extract_mobilenet_embedding(mobilenet_model, img, device)
+                    pred_mn_cluster = kmeans_mobilenet.predict([emb_mn])[0]
+                    pred_mn = map_cluster_to_label(pred_mn_cluster, "mobilenet")
+                    t_mn = time.perf_counter() - start
+                
+                with st.spinner("Running CLIP classification..."):
+                    # CLIP prediction
+                    start = time.perf_counter()
+                    emb_clip = extract_clip_embedding(clip_model, preprocess, img, device)
+                    pred_clip_cluster = kmeans_clip.predict([emb_clip])[0]
+                    pred_clip = map_cluster_to_label(pred_clip_cluster, "clip")
+                    t_clip = time.perf_counter() - start
+                
+                # Ensemble prediction
+                pred_ensemble = ensemble_vote(pred_mn, pred_clip)
+                
+                # Display results
+                st.metric("MobileNet Prediction", pred_mn, f"{t_mn:.4f}s")
+                st.metric("CLIP Prediction", pred_clip, f"{t_clip:.4f}s")
+                st.metric("🎯 Ensemble Prediction", pred_ensemble)
+                
+                # Confidence indicator
+                if pred_mn == pred_clip:
+                    st.success("✅ Both models agree - High confidence")
+                else:
+                    st.warning("⚠️ Models disagree - Lower confidence (using CLIP)")
+                
+                # Additional info
+                with st.expander("Technical Details"):
+                    st.write(f"**MobileNet cluster:** {pred_mn_cluster}")
+                    st.write(f"**CLIP cluster:** {pred_clip_cluster}")
+                    st.write(f"**Device:** {device}")
+                    st.write(f"**Image size:** {img.size}")
+
         except Exception as e:
-            continue
-        # run CLIP
-        try:
-            clip_label, clip_conf = clip_predict(pil, clip_model, clip_pre)
-        except Exception as e:
-            clip_label, clip_conf = "error", 0.0
-        cnn_label, cnn_conf = None, None
-        if use_cnn and cnn_model is not None:
-            try:
-                cnn_label, cnn_conf = cnn_predict(pil, cnn_model, cnn_transform)
-            except Exception as e:
-                cnn_label, cnn_conf = None, None
-        # ensemble rule: if both exist and agree -> choose that label; if disagree -> choose higher confidence
-        final_label = clip_label
-        final_conf = clip_conf
-        if cnn_label is not None:
-            if cnn_label == clip_label:
-                # average confidence
-                final_conf = (clip_conf + cnn_conf) / 2.0
-                final_label = clip_label
-            else:
-                # choose higher confidence
-                if cnn_conf > clip_conf:
-                    final_label = cnn_label
-                    final_conf = cnn_conf
-        results.append({
-            "image_path": p,
-            "clip_label": clip_label,
-            "clip_confidence": float(clip_conf),
-            "cnn_label": cnn_label,
-            "cnn_confidence": (float(cnn_conf) if cnn_conf is not None else None),
-            "final_label": final_label,
-            "final_confidence": float(final_conf)
-        })
-    return results
+            st.error(f"Error processing image: {e}")
+    
+    # Instructions
+    st.markdown("---")
+    st.markdown("""
+    ### How it works:
+    1. **MobileNet**: Extracts visual features using a pre-trained CNN
+    2. **CLIP**: Uses vision-language understanding for more semantic features  
+    3. **Ensemble**: Combines both predictions (CLIP takes priority in case of disagreement)
+    
+    ### Note:
+    This is an **unsupervised** approach using clustering. Make sure you have:
+    - Run `python scripts/cluster_images.py --src <data_dir> --out results.csv` 
+    - Run `python scripts/clip_cluster.py --src <data_dir> --out results_clip.csv`
+    - Both should generate model files in the `models/` directory
+    """)
 
-# -------------------------
-# Gradio UI callbacks
-# -------------------------
-def handle_pdf_upload(pdf_file, use_cnn):
-    if pdf_file is None:
-        return "No file uploaded", None
-    tmp = tempfile.TemporaryDirectory()
-    try:
-        pdf_bytes = pdf_file.read()
-        img_paths = extract_images_from_pdf_bytes(pdf_bytes, tmp.name)
-        if not img_paths:
-            return "No images found in PDF.", None
-        results = classify_images(img_paths, use_cnn=use_cnn)
-        # prepare dataframe for download
-        df = pd.DataFrame(results)
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        # prepare images for display: pick first N thumbnails
-        thumbs = []
-        for r in results[:30]:
-            pil = load_pil_image(r["image_path"])
-            thumbnails_io = io.BytesIO()
-            pil.resize((240,240)).save(thumbnails_io, format="PNG")
-            thumbs.append((thumbnails_io.getvalue(), r["final_label"], r["final_confidence"]))
-        return (f"Processed {len(img_paths)} images. Download CSV for full results.", (csv_bytes, "results.csv")), thumbs
-    except Exception as e:
-        return f"Error: {e}\n{traceback.format_exc()}", None
-    finally:
-        pass  # tmp remains until process exits; HF Spaces ephemeral storage okay
 
-def handle_url(url: str, use_cnn: bool):
-    if not url:
-        return "No URL provided", None
-    tmp = tempfile.TemporaryDirectory()
-    try:
-        img_paths = extract_images_from_url(url, tmp.name)
-        if not img_paths:
-            return "No downloadable <img> tags found at URL.", None
-        results = classify_images(img_paths, use_cnn=use_cnn)
-        df = pd.DataFrame(results)
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        thumbs = []
-        for r in results[:30]:
-            pil = load_pil_image(r["image_path"])
-            thumbnails_io = io.BytesIO()
-            pil.resize((240,240)).save(thumbnails_io, format="PNG")
-            thumbs.append((thumbnails_io.getvalue(), r["final_label"], r["final_confidence"]))
-        return (f"Processed {len(img_paths)} images. Download CSV for full results.", (csv_bytes, "results.csv")), thumbs
-    except Exception as e:
-        return f"Error: {e}\n{traceback.format_exc()}", None
-
-def handle_images_upload(images: List[io.BytesIO], use_cnn: bool):
-    if not images:
-        return "No images uploaded", None
-    tmp = tempfile.mkdtemp()
-    paths = []
-    for i, img_byte in enumerate(images):
-        content = img_byte.read() if hasattr(img_byte, "read") else img_byte
-        p = Path(tmp) / f"upload_{i+1}.png"
-        with open(p, "wb") as f:
-            f.write(content)
-        paths.append(str(p))
-    results = classify_images(paths, use_cnn=use_cnn)
-    df = pd.DataFrame(results)
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    thumbs = []
-    for r in results[:30]:
-        pil = load_pil_image(r["image_path"])
-        thumbnails_io = io.BytesIO()
-        pil.resize((240,240)).save(thumbnails_io, format="PNG")
-        thumbs.append((thumbnails_io.getvalue(), r["final_label"], r["final_confidence"]))
-    return (f"Processed {len(paths)} uploaded images. Download CSV for full results.", (csv_bytes, "results.csv")), thumbs
-
-# -------------------------
-# Gradio Layout
-# -------------------------
-with gr.Blocks(title="Medical vs Non-Medical Image Classifier") as demo:
-    gr.Markdown("# Medical vs Non-Medical Image Classifier")
-    gr.Markdown("Upload a PDF, provide a webpage URL, or upload images. Uses CLIP zero-shot + optional MobileNetV2 CNN.")
-    with gr.Row():
-        with gr.Column():
-            pdf_in = gr.File(label="Upload PDF (extract images from PDF)", file_types=[".pdf"])
-            url_in = gr.Textbox(label="Or enter web page URL (will download <img> tags)", placeholder="https://example.com")
-            img_upload = gr.Files(label="Or upload image files (jpg/png)", file_count="multiple")
-            use_cnn_checkbox = gr.Checkbox(label="Use fine-tuned CNN (if best_model.pth present)", value=True)
-            run_pdf = gr.Button("Classify PDF")
-            run_url = gr.Button("Classify URL")
-            run_img = gr.Button("Classify Uploaded Images")
-            status = gr.Markdown("", visible=True)
-        with gr.Column():
-            csv_download = gr.File(label="Download results CSV", interactive=False)
-            gallery = gr.Gallery(label="Top results (thumbnails)").style(grid=[3], height="auto")
-
-    # Callbacks
-    run_pdf.click(fn=handle_pdf_upload, inputs=[pdf_in, use_cnn_checkbox], outputs=[status, gallery])
-    run_url.click(fn=handle_url, inputs=[url_in, use_cnn_checkbox], outputs=[status, gallery])
-    run_img.click(fn=handle_images_upload, inputs=[img_upload, use_cnn_checkbox], outputs=[status, gallery])
-
-demo.launch(server_name="0.0.0.0", server_port=7860)
+if __name__ == "__main__":
+    main()

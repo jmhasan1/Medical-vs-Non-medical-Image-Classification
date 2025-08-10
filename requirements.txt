@@ -12,6 +12,7 @@ scikit-learn
 torch
 torchvision
 git+https://github.com/mlfoundations/open_clip.git@main
+streamlit
 
 # torch>=1.13.0
 # torchvision

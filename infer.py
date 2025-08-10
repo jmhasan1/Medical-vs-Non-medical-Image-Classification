@@ -1,53 +1,62 @@
-# infer.py
-import argparse, os
-from PIL import Image
+import os
+import time
 import torch
-from models.clip_inference import clip_zero_shot_predict
-from models.cnn_model import get_model
-from utils.preprocess import get_transforms
+import pandas as pd
+from PIL import Image
+from scripts.cluster_images import get_basic_transforms, load_mobilenet_model, extract_mobilenet_embedding
+from scripts.clip_cluster import load_clip_model, extract_clip_embedding
+import joblib
 
-def run_inference_folder(folder, cnn_weights=None, device=None):
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    image_paths = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png','.jpg','.jpeg','.bmp','.tiff'))]
-    image_paths.sort()
-    # Load CNN if given
-    cnn_model = None
-    transform = get_transforms(img_size=224, is_train=False)
-    if cnn_weights:
-        cnn_model = get_model(num_classes=2, base_model="mobilenet_v2", pretrained=False)
-        cnn_model.load_state_dict(torch.load(cnn_weights, map_location=device))
-        cnn_model.to(device)
-        cnn_model.eval()
+def infer(images_folder, kmeans_mobilenet_path, kmeans_clip_path, device='cuda'):
+    mobilenet_model = load_mobilenet_model(device)
+    clip_model, preprocess = load_clip_model(device)
+    kmeans_mobilenet = joblib.load(kmeans_mobilenet_path)
+    kmeans_clip = joblib.load(kmeans_clip_path)
 
-    results = []
-    for p in image_paths:
-        img = Image.open(p).convert("RGB")
-        print("Image:", p)
-        # CLIP
-        try:
-            clip_res = clip_zero_shot_predict(img, device=device)
-            clip_pred = clip_res['labels'][int(clip_res['probs'].argmax())]
-            print("CLIP:", list(zip(clip_res['labels'], clip_res['probs'])))
-        except Exception as e:
-            print("CLIP failed:", e)
-            clip_pred = None
-        # CNN
-        cnn_pred = None
-        if cnn_model is not None:
-            x = transform(img).unsqueeze(0).to(device)
-            with torch.no_grad():
-                out = cnn_model(x)
-                probs = torch.softmax(out, dim=1).cpu().numpy()[0]
-                # index 1 is medical in our training convention
-                cnn_pred = ("medical" if probs[1] > probs[0] else "non-medical", float(max(probs)))
-                print("CNN:", cnn_pred)
-        print("-"*40)
-        results.append({"image": p, "clip": clip_pred, "cnn": cnn_pred})
-    return results
+    image_files = [f for f in os.listdir(images_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+
+    times_mobilenet = []
+    times_clip = []
+    preds_mobilenet = []
+    preds_clip = []
+
+    for img_file in image_files:
+        img_path = os.path.join(images_folder, img_file)
+        img = Image.open(img_path).convert('RGB')
+
+        # MobileNet inference
+        start = time.perf_counter()
+        emb_mn = extract_mobilenet_embedding(mobilenet_model, img, device)
+        pred_mn = kmeans_mobilenet.predict([emb_mn])[0]
+        end = time.perf_counter()
+        times_mobilenet.append(end - start)
+        preds_mobilenet.append((img_file, pred_mn))
+
+        # CLIP inference
+        start = time.perf_counter()
+        emb_clip = extract_clip_embedding(clip_model, preprocess, img, device)
+        pred_clip = kmeans_clip.predict([emb_clip])[0]
+        end = time.perf_counter()
+        times_clip.append(end - start)
+        preds_clip.append((img_file, pred_clip))
+
+    avg_time_mn = sum(times_mobilenet) / len(times_mobilenet)
+    avg_time_clip = sum(times_clip) / len(times_clip)
+
+    print(f"MobileNet + KMeans average inference time per image: {avg_time_mn:.4f} seconds")
+    print(f"CLIP + KMeans average inference time per image: {avg_time_clip:.4f} seconds")
+
+    # Save predictions CSV
+    pd.DataFrame(preds_mobilenet, columns=['image', 'cluster']).to_csv('mobilenet_predictions.csv', index=False)
+    pd.DataFrame(preds_clip, columns=['image', 'cluster']).to_csv('clip_predictions.csv', index=False)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--folder", required=True)
-    parser.add_argument("--cnn_weights", default=None)
+    import argparse
+    parser = argparse.ArgumentParser(description='Inference script with timing')
+    parser.add_argument('--images', type=str, required=True, help='Folder of images to infer')
+    parser.add_argument('--kmeans_mobilenet', type=str, required=True, help='Path to MobileNet KMeans model (pickle)')
+    parser.add_argument('--kmeans_clip', type=str, required=True, help='Path to CLIP KMeans model (pickle)')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use: cuda or cpu')
     args = parser.parse_args()
-    run_inference_folder(args.folder, args.cnn_weights)
+
+    infer(args.images, args.kmeans_mobilenet, args.kmeans_clip, args.device)

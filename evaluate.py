@@ -1,39 +1,34 @@
-# evaluate.py
-import csv, time, argparse, os
-from infer import run_inference_folder
+import pandas as pd
+import numpy as np
+from sklearn.metrics import accuracy_score, confusion_matrix
+from scipy.optimize import linear_sum_assignment
+import argparse
 
-def evaluate(folder, labels_csv, cnn_weights=None):
-    # labels_csv : CSV with columns 'path,label' where label is 'medical' or 'non-medical'
-    gt = {}
-    with open(labels_csv, newline='') as f:
-        r = csv.reader(f)
-        for row in r:
-            if len(row) >= 2:
-                gt[row[0]] = row[1]
-    preds = run_inference_folder(folder, cnn_weights=cnn_weights)
-    total = 0
-    correct_clip = 0
-    correct_cnn = 0
-    for r in preds:
-        img_rel = os.path.basename(r['image'])
-        if img_rel not in gt:
-            continue
-        total += 1
-        if r['clip'] == gt[img_rel]:
-            correct_clip += 1
-        if r['cnn'] is not None and r['cnn'][0] == gt[img_rel]:
-            correct_cnn += 1
-    return {
-        "total": total,
-        "clip_acc": correct_clip/total if total else None,
-        "cnn_acc": correct_cnn/total if total else None
-    }
+def best_map(true_labels, pred_labels):
+    cm = confusion_matrix(true_labels, pred_labels)
+    row_ind, col_ind = linear_sum_assignment(-cm)
+    mapping = dict(zip(col_ind, row_ind))
+    new_preds = np.array([mapping.get(c, c) for c in pred_labels])
+    return new_preds
+
+def evaluate(pred_csv, gt_csv, image_col='image', pred_col='cluster', label_col='label'):
+    pred_df = pd.read_csv(pred_csv)
+    gt_df = pd.read_csv(gt_csv)
+
+    merged = pd.merge(pred_df, gt_df, on=image_col, how='inner')
+    true_labels = merged[label_col].values
+    pred_labels = merged[pred_col].values
+
+    mapped_preds = best_map(true_labels, pred_labels)
+    acc = accuracy_score(true_labels, mapped_preds)
+
+    print(f"Accuracy: {acc:.4f}")
+    return acc
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--folder", required=True)
-    parser.add_argument("--labels_csv", required=True)
-    parser.add_argument("--cnn_weights", default=None)
+    parser = argparse.ArgumentParser(description='Evaluate clustering predictions.')
+    parser.add_argument('--predictions', type=str, required=True, help='CSV file with predictions (image, cluster)')
+    parser.add_argument('--groundtruth', type=str, required=True, help='CSV file with ground truth labels (image, label)')
     args = parser.parse_args()
-    res = evaluate(args.folder, args.labels_csv, args.cnn_weights)
-    print(res)
+
+    evaluate(args.predictions, args.groundtruth)

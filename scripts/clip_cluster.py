@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import os
+import joblib
 import sys
 import torch
 import clip
@@ -116,6 +117,11 @@ if __name__ == "__main__":
     kmeans = KMeans(n_clusters=args.clusters, random_state=42)
     cluster_ids = kmeans.fit_predict(embeddings)
 
+    # --- New code: Save the trained KMeans model ---
+    os.makedirs('models', exist_ok=True)  # Create models directory if needed
+    joblib.dump(kmeans, 'models/kmeans_clip.pkl')  # Save KMeans model pickle
+    print("Saved CLIP KMeans model to models/kmeans_clip.pkl")
+
     # Zero-shot mapping
     cluster_labels = {}
     for cluster_id in range(args.clusters):
@@ -143,3 +149,5 @@ if __name__ == "__main__":
     if args.save_dir:
         save_images_by_label(df, args.save_dir)
         print(f"📂 Classified images saved to {args.save_dir}")
+    
+    
