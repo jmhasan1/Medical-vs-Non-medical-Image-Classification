@@ -3,7 +3,7 @@
 ## Quick overview
 - Extract images from PDFs & web pages.
 - Two inference paths:
-  - CLIP zero-shot (no training)
+  - CLIP zero-shot (no training) _ KMeans
   - Lightweight CNN (MobileNetV2 for featre extraction) ad K-Means for clustering 
 
 ## Setup
