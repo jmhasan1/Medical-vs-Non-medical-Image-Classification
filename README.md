@@ -333,14 +333,14 @@ streamlit run app.py
 - **Processing Speed**: Images per second
 - **Memory Usage**: RAM consumption during processing
 - **Scalability**: Performance with increasing data volume
-
+<!-- 
 ### **Model Comparison**
 
 | Model | Accuracy | Speed (img/sec) | Memory (GB) | Training Required |
 |-------|----------|-----------------|-------------|-------------------|
 | **CLIP Zero-shot** | ~85-90% | 15-20 | 2-3 | ❌ No |
 | **MobileNet + K-Means** | ~80-85% | 25-30 | 1-2 | ✅ Yes |
-| **Ensemble** | ~90-95% | 12-18 | 3-4 | ⚖️ Partial |
+| **Ensemble** | ~90-95% | 12-18 | 3-4 | ⚖️ Partial | -->
 
 ### **Ablation Studies**
 - **Impact of preprocessing**: Image quality vs. processing speed
